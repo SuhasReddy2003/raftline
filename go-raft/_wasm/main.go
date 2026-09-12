@@ -115,19 +115,19 @@ func resizeCluster(this js.Value, args []js.Value) interface{} {
 
 func main() {
 	js.Global().Set("raftline", js.ValueOf(map[string]interface{}{
-		"newCluster":    js.FuncOf(newCluster),
-		"start":         js.FuncOf(start),
-		"stop":          js.FuncOf(stop),
-		"pause":         js.FuncOf(pause),
-		"resume":        js.FuncOf(resume),
-		"killNode":      js.FuncOf(killNode),
-		"reviveNode":    js.FuncOf(reviveNode),
-		"partition":     js.FuncOf(partition),
-		"healPartition": js.FuncOf(healPartition),
-		"submitWrite":   js.FuncOf(submitWrite),
-		"getSnapshot":   js.FuncOf(getSnapshot),
-		"setOnEvent":    js.FuncOf(setOnEvent),
-		"resizeCluster": js.FuncOf(resizeCluster),
+		"newCluster":     js.FuncOf(newCluster),
+		"start":          js.FuncOf(start),
+		"stop":           js.FuncOf(stop),
+		"pause":          js.FuncOf(pause),
+		"resume":         js.FuncOf(resume),
+		"killNode":       js.FuncOf(killNode),
+		"reviveNode":     js.FuncOf(reviveNode),
+		"partition":      js.FuncOf(partition),
+		"healPartition":  js.FuncOf(healPartition),
+		"submitWrite":    js.FuncOf(submitWrite),
+		"getSnapshot":    js.FuncOf(getSnapshot),
+		"setOnEvent":     js.FuncOf(setOnEvent),
+		"resizeCluster":  js.FuncOf(resizeCluster),
 	}))
 	select {} // keep the Go program alive
 }

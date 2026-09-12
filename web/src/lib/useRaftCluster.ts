@@ -14,6 +14,7 @@ export interface NodeSnapshot {
   Alive: boolean;
   Log: { Term: number; Index: number; Command: string }[];
   Unreachable: string[];
+  StateMachine: Record<string, string>;
 }
 
 export interface Stats {
@@ -93,7 +94,6 @@ declare global {
 }
 
 const DEFAULT_NODE_IDS = ["n1", "n2", "n3", "n4", "n5"];
-const POLL_INTERVAL_MS = 200;
 
 function isErrorResult(v: unknown): v is { error: string } {
   return typeof v === "object" && v !== null && "error" in v;
@@ -146,8 +146,6 @@ export function useRaftCluster(nodeIds: string[] = DEFAULT_NODE_IDS) {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [debugLog, setDebugLog] = useState<string[]>([]);
 
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
   const log = useCallback((msg: string) => {
     setDebugLog((prev) => [...prev, `[${new Date().toISOString().slice(11, 23)}] ${msg}`]);
   }, []);
@@ -170,7 +168,6 @@ export function useRaftCluster(nodeIds: string[] = DEFAULT_NODE_IDS) {
           refreshSnapshot();
         });
         refreshSnapshot();
-        //pollRef.current = setInterval(refreshSnapshot, POLL_INTERVAL_MS);
         setReady(true);
         log("READY!");
       })
@@ -183,7 +180,6 @@ export function useRaftCluster(nodeIds: string[] = DEFAULT_NODE_IDS) {
 
     return () => {
       mounted = false;
-      if (pollRef.current) clearInterval(pollRef.current);
       // Deliberately NOT calling window.raftline?.stop() here. In React 18
       // Strict Mode (dev only), this cleanup fires as part of a synthetic
       // mount -> cleanup -> remount cycle; stopping the cluster here would
@@ -194,35 +190,25 @@ export function useRaftCluster(nodeIds: string[] = DEFAULT_NODE_IDS) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Pause the simulation while the tab is hidden/backgrounded. Without
-  // this, Chrome throttles this tab's timers down to ~1/sec while hidden;
-  // when it comes back to the foreground all the backed-up election
-  // timers fire in the same burst instead of staying spread out by their
-  // randomized stagger, which was causing runaway election storms after
-  // 30-60s idle. Pausing on hidden and resetting every timer on resume
-  // avoids that entirely.
+  // Pause/resume the simulation while the browser tab is hidden. Chrome
+  // throttles JS timers heavily in background tabs, which otherwise
+  // causes a burst of backed-up election timeouts to fire all at once the
+  // moment the tab regains focus — producing a runaway spike of spurious
+  // elections. Pausing sidesteps this entirely rather than trying to
+  // compensate for throttled timing after the fact.
   useEffect(() => {
-    const onVisibilityChange = () => {
-      if (document.hidden) {
-        window.raftline?.pause();
-      } else {
-        window.raftline?.resume();
-      }
+    const onVis = () => {
+      if (document.hidden) window.raftline?.pause();
+      else window.raftline?.resume();
     };
-    document.addEventListener("visibilitychange", onVisibilityChange);
-    return () => document.removeEventListener("visibilitychange", onVisibilityChange);
+    document.addEventListener("visibilitychange", onVis);
+    return () => document.removeEventListener("visibilitychange", onVis);
   }, []);
 
   const killNode = useCallback((id: string) => {
     window.raftline?.killNode(id);
     refreshSnapshot();
   }, [refreshSnapshot]);
-
-  const resizeCluster = useCallback((ids: string[]) => {
-  window.raftline?.resizeCluster(ids);
-  setEvents([]);
-  refreshSnapshot();
-}, [refreshSnapshot]);
 
   const reviveNode = useCallback((id: string) => {
     window.raftline?.reviveNode(id);
@@ -245,11 +231,25 @@ export function useRaftCluster(nodeIds: string[] = DEFAULT_NODE_IDS) {
     return result;
   }, [refreshSnapshot]);
 
+  const resizeCluster = useCallback((ids: string[]) => {
+    window.raftline?.resizeCluster(ids);
+    setEvents([]);
+    refreshSnapshot();
+  }, [refreshSnapshot]);
+
   return {
-  ready, loadError, snapshot, events, debugLog,
-  killNode, reviveNode, partition, healPartition, submitWrite,
-  resizeCluster,
-};
+    ready,
+    loadError,
+    snapshot,
+    events,
+    debugLog,
+    killNode,
+    reviveNode,
+    partition,
+    healPartition,
+    submitWrite,
+    resizeCluster,
+  };
 }
 
 function waitForGo(timeoutMs = 5000): Promise<void> {

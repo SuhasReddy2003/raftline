@@ -92,6 +92,7 @@ func (n *Node) HandleAppendEntries(args AppendEntriesArgs) AppendEntriesReply {
 			lastNewIndex = args.Entries[len(args.Entries)-1].Index
 		}
 		n.CommitIndex = min(args.LeaderCommit, lastNewIndex)
+		n.ApplyCommitted() // CHANGED: apply newly committed entries to the state machine
 	}
 
 	return AppendEntriesReply{Term: n.CurrentTerm, Success: true}
@@ -187,4 +188,6 @@ func (n *Node) advanceCommitIndex(peerIDs []string) {
 			n.CommitIndex = entry.Index
 		}
 	}
+
+	n.ApplyCommitted() // CHANGED: apply newly committed entries to the state machine
 }

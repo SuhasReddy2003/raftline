@@ -14,9 +14,9 @@ import (
 // The frontend (or a WASM bridge) can subscribe via Cluster.OnEvent.
 type Event struct {
 	Time time.Time
-	Type string // "election_started" | "leader_elected" | "vote_rejected" |
-	// "node_failed" | "node_recovered" | "partitioned" | "healed" |
-	// "write_submitted" | "committed"
+	Type string // "election_started" | "leader_elected" | "vote_granted" |
+	// "vote_rejected" | "node_failed" | "node_recovered" | "partitioned" |
+	// "healed" | "write_submitted" | "committed"
 	NodeID string
 	Term   int
 	Index  int
@@ -57,13 +57,6 @@ type Cluster struct {
 
 	stats Stats
 
-	// paused, when true, freezes election timeouts and leader heartbeats
-	// from actually firing (the underlying timers/tickers keep running,
-	// they just no-op) — set via SetPaused, driven by the frontend's
-	// document.visibilitychange so a backgrounded/throttled tab can't
-	// build up a burst of delayed timer fires that all land at once.
-	paused bool
-
 	// events is drained by a single dedicated goroutine (started in Start)
 	// so that OnEvent is always invoked from exactly one goroutine, in
 	// emission order. This matters beyond just avoiding data races in a
@@ -99,11 +92,22 @@ type Cluster struct {
 	// actually breaks it.
 	electionFailStreak map[string]int
 
+	// paused halts election timeouts and heartbeats without stopping the
+	// cluster's goroutines outright. Used to freeze the simulation while
+	// the browser tab is hidden/backgrounded — Chrome throttles JS timers
+	// heavily in that state, which otherwise causes a burst of backed-up
+	// election timeouts to fire all at once the moment the tab regains
+	// focus, producing a runaway spike of spurious elections.
+	paused bool
+
+	// latencyEWMA is an exponentially-weighted moving average of simulated
+	// RPC latency, surfaced in Stats.AvgLatencyMs for the UI.
+	latencyEWMA float64
+
 	// OnEvent, if set, is called for every simulation event, one at a
 	// time, from the dispatch goroutine. Safe for it to call back into
 	// Cluster methods (e.g. to update a UI).
-	OnEvent     func(Event)
-	latencyEWMA float64
+	OnEvent func(Event)
 }
 
 // minElectionInterval is the base floor between successive election
@@ -192,15 +196,10 @@ func (c *Cluster) Stop() {
 	c.wg.Wait()
 }
 
-// SetPaused freezes (true) or resumes (false) election timeouts and leader
-// heartbeats cluster-wide. The underlying timers/tickers keep running
-// either way — pausing just makes their fire cases no-op — so on resume
-// we explicitly reset every node's election timer rather than letting
-// whatever the (possibly throttled, backed-up) timer last had queued carry
-// over. This is the fix for elections spiking after a backgrounded browser
-// tab gets throttled by Chrome and its timers fire in a delayed burst: the
-// frontend calls SetPaused(true) on document.hidden and SetPaused(false)
-// on visibility restore, so nothing fires while the tab is backgrounded.
+// SetPaused freezes (true) or resumes (false) election timeouts and
+// heartbeats cluster-wide, without stopping any goroutines. On resume,
+// every node's election timer is reset fresh so nothing "catches up" on
+// time that passed while paused.
 func (c *Cluster) SetPaused(p bool) {
 	c.mu.Lock()
 	c.paused = p
@@ -342,20 +341,23 @@ func (c *Cluster) GetLeader() (string, bool) {
 
 // NodeSnapshot is a read-only, race-free copy of a node's visible state.
 type NodeSnapshot struct {
-	ID          string
-	State       string
-	CurrentTerm int
-	VotedFor    string
-	LogLength   int
-	CommitIndex int
-	Alive       bool
-	Log         []LogEntry
-	Unreachable []string
+	ID           string
+	State        string
+	CurrentTerm  int
+	VotedFor     string
+	LogLength    int
+	CommitIndex  int
+	Alive        bool
+	Log          []LogEntry
+	Unreachable  []string
+	StateMachine map[string]string
 }
 
 // Snapshot returns a consistent point-in-time view of every node plus
-// cluster stats, safe to hand to a renderer.
-
+// cluster stats, safe to hand to a renderer. Nodes are sorted by ID so the
+// order is stable across calls — Go's map iteration order is randomized,
+// and an unsorted slice here would make frontend node positions jump
+// around on every refresh.
 func (c *Cluster) Snapshot() ([]NodeSnapshot, Stats) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -368,16 +370,23 @@ func (c *Cluster) Snapshot() ([]NodeSnapshot, Stats) {
 			}
 		}
 		sort.Strings(unreachable)
+
+		sm := make(map[string]string, len(n.StateMachine))
+		for k, v := range n.StateMachine {
+			sm[k] = v
+		}
+
 		out = append(out, NodeSnapshot{
-			ID:          id,
-			State:       n.State.String(),
-			CurrentTerm: n.CurrentTerm,
-			VotedFor:    n.VotedFor,
-			LogLength:   len(n.Log),
-			CommitIndex: n.CommitIndex,
-			Alive:       n.Alive,
-			Log:         append([]LogEntry{}, n.Log...),
-			Unreachable: unreachable,
+			ID:           id,
+			State:        n.State.String(),
+			CurrentTerm:  n.CurrentTerm,
+			VotedFor:     n.VotedFor,
+			LogLength:    len(n.Log),
+			CommitIndex:  n.CommitIndex,
+			Alive:        n.Alive,
+			Log:          append([]LogEntry{}, n.Log...),
+			Unreachable:  unreachable,
+			StateMachine: sm,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
@@ -386,7 +395,8 @@ func (c *Cluster) Snapshot() ([]NodeSnapshot, Stats) {
 
 // ---- internals: simulated network -----------------------------------------
 
-// latency models one-way simulated network delay, 5-50ms.
+// latency models one-way simulated network delay, 5-50ms, and tracks a
+// rolling average in Stats.AvgLatencyMs for the UI.
 func (c *Cluster) latency() time.Duration {
 	ms := 5 + rand.Intn(46)
 	c.mu.Lock()
