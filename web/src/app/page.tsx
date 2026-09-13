@@ -17,9 +17,13 @@ const COLORS = {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const HISTORY_CAP = 200;
+const ALL_IDS = ["n1", "n2", "n3", "n4", "n5", "n6", "n7"];
 
 export default function Home() {
-  const { ready, loadError, snapshot, events, killNode, reviveNode, partition, healPartition, submitWrite } = useRaftCluster();
+  const {
+    ready, loadError, snapshot, events,
+    killNode, reviveNode, partition, healPartition, submitWrite, resizeCluster,
+  } = useRaftCluster();
 
   const [toast, setToast] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -27,14 +31,13 @@ export default function Home() {
   const [presentMode, setPresentMode] = useState(false);
   const [scrubIndex, setScrubIndex] = useState<number | null>(null);
   const [soundOn, setSoundOn] = useState(false);
+  const [clusterSize, setClusterSize] = useState(5);
 
   const prevCommitted = useRef(0);
   const termHistory = useRef<number[]>([]);
   const snapshotHistory = useRef<ClusterSnapshot[]>([]);
   const lastEventCount = useRef(0);
 
-  // Sound cues: play a short tone for the most recent event when enabled.
-  // Off by default since audio autoplay should always be an opt-in.
   useEffect(() => {
     if (!soundOn) return;
     const last = events[events.length - 1];
@@ -114,6 +117,14 @@ export default function Home() {
     setScenarioCaption("Recovered — cluster is healthy again");
     await sleep(2000);
     setScenarioCaption(null);
+  };
+
+  const changeClusterSize = (n: number) => {
+    setClusterSize(n);
+    termHistory.current = [];
+    snapshotHistory.current = [];
+    setScrubIndex(null);
+    resizeCluster(ALL_IDS.slice(0, n));
   };
 
   const exportHistory = () => {
@@ -249,6 +260,17 @@ export default function Home() {
           </div>
         )}
 
+        {!presentMode && (
+          <div className="size-control">
+            <span className="size-label">Cluster size:</span>
+            {[3, 5, 7].map((n) => (
+              <button key={n} className={`btn btn-small ${clusterSize === n ? "btn-active" : ""}`} onClick={() => changeClusterSize(n)}>
+                {n} nodes
+              </button>
+            ))}
+          </div>
+        )}
+
         <div className="actions">
           <button disabled={!leader || isScrubbing} onClick={() => leader && killNode(leader.ID)} className="btn btn-danger">
             Kill the leader
@@ -345,6 +367,8 @@ export default function Home() {
         .scrub-tag { color: ${COLORS.leader}; margin-left: 6px; }
         .scrubber-row { display: flex; align-items: center; gap: 10px; margin-top: 16px; }
         .scrub-slider { flex: 1; max-width: 400px; }
+        .size-control { display: flex; gap: 8px; align-items: center; margin-top: 12px; }
+        .size-label { color: ${COLORS.text}; font-family: "IBM Plex Mono", monospace; font-size: 12px; margin-right: 4px; }
         .actions { display: flex; gap: 12px; margin-top: 16px; flex-wrap: wrap; }
         .btn {
           background: transparent; border: 1px solid ${COLORS.text}55; color: white;
@@ -353,6 +377,7 @@ export default function Home() {
           transition: border-color 0.15s ease, transform 0.1s ease;
         }
         .btn-small { padding: 6px 12px; font-size: 12px; }
+        .btn-active { border-color: ${COLORS.follower}; color: ${COLORS.follower}; }
         .btn-ghost { border-color: transparent; color: ${COLORS.text}; }
         .btn:hover:not(:disabled) { border-color: ${COLORS.follower}; transform: translateY(-1px); }
         .btn:disabled { opacity: 0.35; cursor: not-allowed; }

@@ -4,7 +4,7 @@ A live, interactive implementation of the **Raft consensus algorithm** — the p
 
 The core algorithm is implemented in Go, compiled to **WebAssembly**, and runs entirely client-side — no backend server, no database. The simulation itself is real: actual election timeouts, actual RPC latency, actual log replication, running in your browser.
 
-**[Live demo →](your-vercel-url-here)**
+**[Live demo →](https://raftline-8f2o6p1wp-suhas-c255.vercel.app/)**
 
 ![Raftline cluster visualization](docs/screenshot.png)
 
@@ -69,6 +69,7 @@ flowchart TB
 | Browser runtime | WebAssembly (`GOOS=js GOARCH=wasm`) |
 | Frontend | Next.js, React, TypeScript |
 | Visualization | Hand-built SVG (no charting library) |
+| Deployment | Vercel |
 
 ## Scope and known limitations
 
@@ -80,26 +81,6 @@ This is a simulation built for demonstrating and visualizing Raft's behavior, no
 | Log compaction / snapshotting for real storage | Not needed at the log sizes this demo produces |
 | Cluster membership changes (adding/removing nodes at runtime) | Cluster size is fixed per session; resizing tears down and rebuilds |
 | Real network transport (gRPC/TCP) | RPCs are simulated in-process with artificial latency |
-
-## Running locally
-
-**Prerequisites:** Go 1.21+, Node.js 18+
-
-```bash
-# Build the WASM binary
-cd go-raft
-GOOS=js GOARCH=wasm go build -o ../web/public/main.wasm ./_wasm
-
-# Run the Go test suite
-go test ./... -v
-
-# Run the frontend
-cd ../web
-npm install
-npm run dev
-```
-
-Then open `http://localhost:3000`.
 
 ## Project structure
 
