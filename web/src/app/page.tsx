@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { useRaftCluster } from "@/lib/useRaftCluster";
 import ClusterVisualization from "@/components/ClusterVisualization";
 import TermSparkline from "@/components/TermSparkline";
+import HealthMeter from "@/components/HealthMeter";
 
 const COLORS = {
   bg: "#0A0E16",
@@ -55,11 +56,6 @@ export default function Home() {
     return <div style={{ padding: 24, color: COLORS.text, fontFamily: "IBM Plex Mono, monospace" }}>Booting cluster…</div>;
   }
 
-  // A partitioned-away former leader has no way to know a new one was
-  // elected, so more than one alive node can locally believe it's Leader.
-  // Only the highest-term one is legitimate per Raft's term-ordering
-  // invariant — that's who writes should route to, and who the UI treats
-  // as "the" leader everywhere else on the page.
   const aliveLeaders = snapshot.nodes.filter((n) => n.State === "Leader" && n.Alive);
   const splitBrain = aliveLeaders.length > 1;
   const leader = aliveLeaders.reduce<typeof aliveLeaders[number] | null>(
@@ -116,6 +112,12 @@ export default function Home() {
             {presentMode ? "Exit presentation mode" : "Presentation mode"}
           </button>
         </div>
+
+        {!presentMode && (
+          <div className="health-row">
+            <HealthMeter aliveCount={aliveCount} total={snapshot.nodes.length} hasQuorum={hasQuorum} avgLatencyMs={snapshot.stats.AvgLatencyMs} />
+          </div>
+        )}
 
         {splitBrain && leader && (
           <div className="split-brain-banner">
@@ -255,6 +257,7 @@ export default function Home() {
         .header-row { display: flex; justify-content: space-between; align-items: flex-start; }
         .title { font-size: 34px; margin-bottom: 6px; letter-spacing: -0.02em; }
         .subtitle { color: ${COLORS.text}; margin-bottom: 20px; font-size: 15px; }
+        .health-row { margin-bottom: 16px; }
         .split-brain-banner {
           background: rgba(232, 93, 107, 0.1); border: 1px solid ${COLORS.dead}55; color: ${COLORS.dead};
           padding: 10px 16px; border-radius: 8px; font-family: "IBM Plex Mono", monospace; font-size: 12px;
