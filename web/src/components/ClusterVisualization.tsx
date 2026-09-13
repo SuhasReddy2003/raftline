@@ -32,8 +32,21 @@ export default function ClusterVisualization({ nodes, events, onKillNode, onRevi
   const radius = 150;
   const positions = pentagonPositions(nodes.length, center, center, radius);
   const posById = Object.fromEntries(nodes.map((n, i) => [n.ID, positions[i]]));
-  const leaderIdx = nodes.findIndex((n) => n.State === "Leader" && n.Alive);
   const maxLog = Math.max(1, ...nodes.map((n) => n.LogLength));
+
+  // Split-brain handling: more than one alive node can locally believe
+  // it's Leader (a partitioned-away former leader has no way to know a
+  // new one was elected). Only the highest-term alive leader is the real,
+  // legitimate one per Raft's term-ordering invariant; any others are
+  // stale and powerless, and are visually marked as such rather than
+  // treated the same as the real leader.
+  const aliveLeaders = nodes.filter((n) => n.State === "Leader" && n.Alive);
+  const legitLeader = aliveLeaders.reduce<NodeSnapshot | null>(
+    (best, n) => (!best || n.CurrentTerm > best.CurrentTerm ? n : best),
+    null
+  );
+  const leaderIdx = legitLeader ? nodes.findIndex((n) => n.ID === legitLeader.ID) : -1;
+  const staleLeaderIds = new Set(aliveLeaders.filter((n) => n.ID !== legitLeader?.ID).map((n) => n.ID));
 
   const [flash, setFlash] = useState<Record<string, "granted" | "rejected">>({});
   const [inFlight, setInFlight] = useState<InFlight[]>([]);
@@ -53,7 +66,6 @@ export default function ClusterVisualization({ nodes, events, onKillNode, onRevi
         });
       }, 450);
 
-      // animate the vote reply traveling back to the candidate (Detail holds candidateID)
       if (last.Detail && posById[last.Detail] && posById[last.NodeID]) {
         const id = `${last.NodeID}-${last.Detail}-${Date.now()}`;
         setInFlight((prev) => [...prev, { id, fromId: last.NodeID, toId: last.Detail, color: kind === "granted" ? COLORS.follower : COLORS.dead }]);
@@ -62,7 +74,6 @@ export default function ClusterVisualization({ nodes, events, onKillNode, onRevi
     }
 
     if (last.Type === "election_started") {
-      // animate the vote request going out from the candidate to every other alive node
       const candidate = last.NodeID;
       nodes.forEach((n) => {
         if (n.ID === candidate || !n.Alive || !posById[n.ID]) return;
@@ -104,37 +115,36 @@ export default function ClusterVisualization({ nodes, events, onKillNode, onRevi
         </g>
 
         {positions.map((p, i) =>
-  positions.slice(i + 1).map((q, j) => {
-    const a = nodes[i], b = nodes[i + 1 + j];
-    const cutOff = a.Unreachable.includes(b.ID) || b.Unreachable.includes(a.ID);
-    return (
-      <line
-        key={`${i}-${j}`} x1={p.x} y1={p.y} x2={q.x} y2={q.y}
-        stroke={cutOff ? COLORS.dead : COLORS.text}
-        strokeOpacity={cutOff ? 0.4 : 0.15}
-        strokeDasharray={cutOff ? "4 4" : undefined}
-        strokeWidth={1}
-      />
-    );
-  })
-)}
+          positions.slice(i + 1).map((q, j) => {
+            const a = nodes[i], b = nodes[i + 1 + j];
+            const cutOff = (a.Unreachable ?? []).includes(b.ID) || (b.Unreachable ?? []).includes(a.ID);
+            return (
+              <line
+                key={`${i}-${j}`} x1={p.x} y1={p.y} x2={q.x} y2={q.y}
+                stroke={cutOff ? COLORS.dead : COLORS.text}
+                strokeOpacity={cutOff ? 0.4 : 0.15}
+                strokeDasharray={cutOff ? "4 4" : undefined}
+                strokeWidth={1}
+              />
+            );
+          })
+        )}
 
         {leaderIdx >= 0 &&
-  positions.map((q, i) => {
-    if (i === leaderIdx) return null;
-    const p = positions[leaderIdx];
-    const peer = nodes[i];
-    const leaderNode = nodes[leaderIdx];
-    const cutOff = leaderNode.Unreachable.includes(peer.ID) || peer.Unreachable.includes(leaderNode.ID);
-    if (!peer.Alive || cutOff) return null;
-    return (
-      <circle key={`pulse-${i}`} r={3} fill={COLORS.leader}>
-        <animateMotion dur="1s" repeatCount="indefinite" path={`M${p.x},${p.y} L${q.x},${q.y}`} />
-      </circle>
-    );
-  })}
+          positions.map((q, i) => {
+            if (i === leaderIdx) return null;
+            const p = positions[leaderIdx];
+            const peer = nodes[i];
+            const leaderNode = nodes[leaderIdx];
+            const cutOff = (leaderNode.Unreachable ?? []).includes(peer.ID) || (peer.Unreachable ?? []).includes(leaderNode.ID);
+            if (!peer.Alive || cutOff) return null;
+            return (
+              <circle key={`pulse-${i}`} r={3} fill={COLORS.leader}>
+                <animateMotion dur="1s" repeatCount="indefinite" path={`M${p.x},${p.y} L${q.x},${q.y}`} />
+              </circle>
+            );
+          })}
 
-        {/* message-in-flight dots for elections/votes */}
         {inFlight.map((m) => {
           const from = posById[m.fromId];
           const to = posById[m.toId];
@@ -150,6 +160,7 @@ export default function ClusterVisualization({ nodes, events, onKillNode, onRevi
           const p = positions[i];
           const color = !n.Alive ? COLORS.dead : n.State === "Leader" ? COLORS.leader : COLORS.follower;
           const isLeader = i === leaderIdx;
+          const isStaleLeader = staleLeaderIds.has(n.ID);
           const flashKind = flash[n.ID];
           const barW = (n.LogLength / maxLog) * 32;
 
@@ -157,6 +168,10 @@ export default function ClusterVisualization({ nodes, events, onKillNode, onRevi
             <g key={n.ID} onClick={() => (n.Alive ? onKillNode(n.ID) : onReviveNode(n.ID))} className="node-group">
               {isLeader && (
                 <circle cx={p.x} cy={p.y} r={30} fill="none" stroke={COLORS.leader} strokeWidth={1.5} strokeDasharray="4 4" className="leader-ring" opacity={0.8} />
+              )}
+
+              {isStaleLeader && (
+                <circle cx={p.x} cy={p.y} r={30} fill="none" stroke={COLORS.dead} strokeWidth={2} strokeDasharray="2 3" className="leader-ring" opacity={0.9} />
               )}
 
               {n.State === "Candidate" && (
@@ -174,15 +189,15 @@ export default function ClusterVisualization({ nodes, events, onKillNode, onRevi
               <text x={p.x} y={p.y + 4} textAnchor="middle" fontSize={11} fontFamily="IBM Plex Mono, monospace" fill={COLORS.bg} fontWeight={700}>
                 {n.ID}
               </text>
-              <text x={p.x} y={p.y + 38} textAnchor="middle" fontSize={11} fontFamily="IBM Plex Mono, monospace" fill={COLORS.text}>
-                {n.State} · T{n.CurrentTerm}
+              <text x={p.x} y={p.y + 38} textAnchor="middle" fontSize={11} fontFamily="IBM Plex Mono, monospace" fill={isStaleLeader ? COLORS.dead : COLORS.text}>
+                {n.State} · T{n.CurrentTerm}{isStaleLeader ? " (stale)" : ""}
               </text>
 
               <rect x={p.x - 16} y={p.y + 46} width={32} height={3} rx={1.5} fill={COLORS.text} opacity={0.15} />
-<rect x={p.x - 16} y={p.y + 46} width={barW} height={3} rx={1.5} fill={color} opacity={0.9} />
-<text x={p.x} y={p.y + 60} textAnchor="middle" fontSize={9} fontFamily="IBM Plex Mono, monospace" fill={COLORS.text}>
-  log {n.LogLength}/{maxLog}
-</text>
+              <rect x={p.x - 16} y={p.y + 46} width={barW} height={3} rx={1.5} fill={color} opacity={0.9} />
+              <text x={p.x} y={p.y + 60} textAnchor="middle" fontSize={9} fontFamily="IBM Plex Mono, monospace" fill={COLORS.text}>
+                log {n.LogLength}/{maxLog}
+              </text>
             </g>
           );
         })}

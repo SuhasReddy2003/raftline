@@ -55,17 +55,29 @@ export default function Home() {
     return <div style={{ padding: 24, color: COLORS.text, fontFamily: "IBM Plex Mono, monospace" }}>Booting cluster…</div>;
   }
 
-  const leader = snapshot.nodes.find((n) => n.State === "Leader" && n.Alive);
+  // A partitioned-away former leader has no way to know a new one was
+  // elected, so more than one alive node can locally believe it's Leader.
+  // Only the highest-term one is legitimate per Raft's term-ordering
+  // invariant — that's who writes should route to, and who the UI treats
+  // as "the" leader everywhere else on the page.
+  const aliveLeaders = snapshot.nodes.filter((n) => n.State === "Leader" && n.Alive);
+  const splitBrain = aliveLeaders.length > 1;
+  const leader = aliveLeaders.reduce<typeof aliveLeaders[number] | null>(
+    (best, n) => (!best || n.CurrentTerm > best.CurrentTerm ? n : best),
+    null
+  );
+
   const aliveIds = snapshot.nodes.filter((n) => n.Alive).map((n) => n.ID);
   const aliveCount = aliveIds.length;
+  const hasQuorum = aliveCount * 2 > snapshot.nodes.length;
   const uptimeSec = Math.floor((Date.now() - new Date(snapshot.stats.StartedAt).getTime()) / 1000);
 
   const statusText = leader
     ? `Healthy — ${leader.ID} leading, term ${leader.CurrentTerm}`
-    : aliveCount * 2 <= snapshot.nodes.length
+    : !hasQuorum
     ? `No quorum — only ${aliveCount} of ${snapshot.nodes.length} nodes alive, can't elect a leader`
     : "Electing a new leader…";
-  const statusColor = leader ? COLORS.follower : aliveCount * 2 <= snapshot.nodes.length ? COLORS.dead : COLORS.leader;
+  const statusColor = leader ? COLORS.follower : !hasQuorum ? COLORS.dead : COLORS.leader;
 
   const runScenario = async () => {
     const currentLeader = snapshot.nodes.find((n) => n.State === "Leader" && n.Alive);
@@ -90,7 +102,6 @@ export default function Home() {
     URL.revokeObjectURL(url);
   };
 
-  // merged set of keys written across any node, for the KV panel
   const allKeys = Array.from(new Set(snapshot.nodes.flatMap((n) => Object.keys(n.StateMachine || {})))).sort();
 
   return (
@@ -105,6 +116,13 @@ export default function Home() {
             {presentMode ? "Exit presentation mode" : "Presentation mode"}
           </button>
         </div>
+
+        {splitBrain && leader && (
+          <div className="split-brain-banner">
+            ⚠ Split leadership detected — {aliveLeaders.map((l) => `${l.ID} (term ${l.CurrentTerm})`).join(" vs ")}.
+            Cluster is correctly routing writes to {leader.ID} (highest term); the other{aliveLeaders.length > 2 ? "s are" : " is"} stale and powerless.
+          </div>
+        )}
 
         <div className="grid">
           <ClusterVisualization nodes={snapshot.nodes} events={events} onKillNode={killNode} onReviveNode={reviveNode} />
@@ -236,7 +254,12 @@ export default function Home() {
         .wrap { max-width: 1100px; margin: 0 auto; padding: 48px 24px 32px; }
         .header-row { display: flex; justify-content: space-between; align-items: flex-start; }
         .title { font-size: 34px; margin-bottom: 6px; letter-spacing: -0.02em; }
-        .subtitle { color: ${COLORS.text}; margin-bottom: 36px; font-size: 15px; }
+        .subtitle { color: ${COLORS.text}; margin-bottom: 20px; font-size: 15px; }
+        .split-brain-banner {
+          background: rgba(232, 93, 107, 0.1); border: 1px solid ${COLORS.dead}55; color: ${COLORS.dead};
+          padding: 10px 16px; border-radius: 8px; font-family: "IBM Plex Mono", monospace; font-size: 12px;
+          margin-bottom: 20px;
+        }
         .grid { display: flex; gap: 32px; flex-wrap: wrap; }
         .panel {
           flex: 1; min-width: 280px;
