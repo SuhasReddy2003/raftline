@@ -5,6 +5,7 @@ import { useRaftCluster, ClusterSnapshot } from "@/lib/useRaftCluster";
 import ClusterVisualization from "@/components/ClusterVisualization";
 import TermSparkline from "@/components/TermSparkline";
 import HealthMeter from "@/components/HealthMeter";
+import { soundForEvent } from "@/lib/sound";
 
 const COLORS = {
   bg: "#0A0E16",
@@ -25,11 +26,20 @@ export default function Home() {
   const [scenarioCaption, setScenarioCaption] = useState<string | null>(null);
   const [presentMode, setPresentMode] = useState(false);
   const [scrubIndex, setScrubIndex] = useState<number | null>(null);
+  const [soundOn, setSoundOn] = useState(false);
 
   const prevCommitted = useRef(0);
   const termHistory = useRef<number[]>([]);
   const snapshotHistory = useRef<ClusterSnapshot[]>([]);
   const lastEventCount = useRef(0);
+
+  // Sound cues: play a short tone for the most recent event when enabled.
+  // Off by default since audio autoplay should always be an opt-in.
+  useEffect(() => {
+    if (!soundOn) return;
+    const last = events[events.length - 1];
+    if (last) soundForEvent(last.Type);
+  }, [events, soundOn]);
 
   useEffect(() => {
     if (!snapshot) return;
@@ -42,10 +52,6 @@ export default function Home() {
     }
   }, [snapshot?.stats.ElectionsHeld]);
 
-  // Record a snapshot into history every time a new event arrives, so the
-  // scrubber can reconstruct "what the cluster looked like at that point."
-  // This is a simple in-memory ring buffer, not a real event-sourced
-  // replay — good enough for a bounded recent-history scrubber.
   useEffect(() => {
     if (!snapshot) return;
     if (events.length !== lastEventCount.current) {
@@ -130,9 +136,14 @@ export default function Home() {
             <h1 className="title">Raftline</h1>
             <p className="subtitle">A live Raft consensus cluster, running in your browser via WASM.</p>
           </div>
-          <button className="btn btn-ghost" onClick={() => setPresentMode((p) => !p)}>
-            {presentMode ? "Exit presentation mode" : "Presentation mode"}
-          </button>
+          <div className="header-actions">
+            <button className="btn btn-ghost" onClick={() => setSoundOn((s) => !s)}>
+              {soundOn ? "Sound: on" : "Sound: off"}
+            </button>
+            <button className="btn btn-ghost" onClick={() => setPresentMode((p) => !p)}>
+              {presentMode ? "Exit presentation mode" : "Presentation mode"}
+            </button>
+          </div>
         </div>
 
         {!presentMode && (
@@ -296,6 +307,7 @@ export default function Home() {
         }
         .wrap { max-width: 1100px; margin: 0 auto; padding: 48px 24px 32px; }
         .header-row { display: flex; justify-content: space-between; align-items: flex-start; }
+        .header-actions { display: flex; gap: 8px; }
         .title { font-size: 34px; margin-bottom: 6px; letter-spacing: -0.02em; }
         .subtitle { color: ${COLORS.text}; margin-bottom: 20px; font-size: 15px; }
         .health-row { margin-bottom: 16px; }
