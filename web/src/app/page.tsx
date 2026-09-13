@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { useRaftCluster } from "@/lib/useRaftCluster";
+import { useRaftCluster, ClusterSnapshot } from "@/lib/useRaftCluster";
 import ClusterVisualization from "@/components/ClusterVisualization";
 import TermSparkline from "@/components/TermSparkline";
 import HealthMeter from "@/components/HealthMeter";
@@ -15,6 +15,7 @@ const COLORS = {
 };
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const HISTORY_CAP = 200;
 
 export default function Home() {
   const { ready, loadError, snapshot, events, killNode, reviveNode, partition, healPartition, submitWrite } = useRaftCluster();
@@ -23,8 +24,12 @@ export default function Home() {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [scenarioCaption, setScenarioCaption] = useState<string | null>(null);
   const [presentMode, setPresentMode] = useState(false);
+  const [scrubIndex, setScrubIndex] = useState<number | null>(null);
+
   const prevCommitted = useRef(0);
   const termHistory = useRef<number[]>([]);
+  const snapshotHistory = useRef<ClusterSnapshot[]>([]);
+  const lastEventCount = useRef(0);
 
   useEffect(() => {
     if (!snapshot) return;
@@ -36,6 +41,18 @@ export default function Home() {
       }
     }
   }, [snapshot?.stats.ElectionsHeld]);
+
+  // Record a snapshot into history every time a new event arrives, so the
+  // scrubber can reconstruct "what the cluster looked like at that point."
+  // This is a simple in-memory ring buffer, not a real event-sourced
+  // replay — good enough for a bounded recent-history scrubber.
+  useEffect(() => {
+    if (!snapshot) return;
+    if (events.length !== lastEventCount.current) {
+      lastEventCount.current = events.length;
+      snapshotHistory.current = [...snapshotHistory.current.slice(-(HISTORY_CAP - 1)), snapshot];
+    }
+  }, [events.length, snapshot]);
 
   useEffect(() => {
     if (!snapshot) return;
@@ -56,22 +73,27 @@ export default function Home() {
     return <div style={{ padding: 24, color: COLORS.text, fontFamily: "IBM Plex Mono, monospace" }}>Booting cluster…</div>;
   }
 
-  const aliveLeaders = snapshot.nodes.filter((n) => n.State === "Leader" && n.Alive);
+  const isScrubbing = scrubIndex !== null && snapshotHistory.current.length > 0;
+  const viewSnapshot = isScrubbing
+    ? snapshotHistory.current[Math.min(scrubIndex!, snapshotHistory.current.length - 1)]
+    : snapshot;
+
+  const aliveLeaders = viewSnapshot.nodes.filter((n) => n.State === "Leader" && n.Alive);
   const splitBrain = aliveLeaders.length > 1;
   const leader = aliveLeaders.reduce<typeof aliveLeaders[number] | null>(
     (best, n) => (!best || n.CurrentTerm > best.CurrentTerm ? n : best),
     null
   );
 
-  const aliveIds = snapshot.nodes.filter((n) => n.Alive).map((n) => n.ID);
+  const aliveIds = viewSnapshot.nodes.filter((n) => n.Alive).map((n) => n.ID);
   const aliveCount = aliveIds.length;
-  const hasQuorum = aliveCount * 2 > snapshot.nodes.length;
-  const uptimeSec = Math.floor((Date.now() - new Date(snapshot.stats.StartedAt).getTime()) / 1000);
+  const hasQuorum = aliveCount * 2 > viewSnapshot.nodes.length;
+  const uptimeSec = Math.floor((Date.now() - new Date(viewSnapshot.stats.StartedAt).getTime()) / 1000);
 
   const statusText = leader
     ? `Healthy — ${leader.ID} leading, term ${leader.CurrentTerm}`
     : !hasQuorum
-    ? `No quorum — only ${aliveCount} of ${snapshot.nodes.length} nodes alive, can't elect a leader`
+    ? `No quorum — only ${aliveCount} of ${viewSnapshot.nodes.length} nodes alive, can't elect a leader`
     : "Electing a new leader…";
   const statusColor = leader ? COLORS.follower : !hasQuorum ? COLORS.dead : COLORS.leader;
 
@@ -98,7 +120,7 @@ export default function Home() {
     URL.revokeObjectURL(url);
   };
 
-  const allKeys = Array.from(new Set(snapshot.nodes.flatMap((n) => Object.keys(n.StateMachine || {})))).sort();
+  const allKeys = Array.from(new Set(viewSnapshot.nodes.flatMap((n) => Object.keys(n.StateMachine || {})))).sort();
 
   return (
     <div className="page">
@@ -115,7 +137,7 @@ export default function Home() {
 
         {!presentMode && (
           <div className="health-row">
-            <HealthMeter aliveCount={aliveCount} total={snapshot.nodes.length} hasQuorum={hasQuorum} avgLatencyMs={snapshot.stats.AvgLatencyMs} />
+            <HealthMeter aliveCount={aliveCount} total={viewSnapshot.nodes.length} hasQuorum={hasQuorum} avgLatencyMs={viewSnapshot.stats.AvgLatencyMs} />
           </div>
         )}
 
@@ -127,12 +149,12 @@ export default function Home() {
         )}
 
         <div className="grid">
-          <ClusterVisualization nodes={snapshot.nodes} events={events} onKillNode={killNode} onReviveNode={reviveNode} />
+          <ClusterVisualization nodes={viewSnapshot.nodes} events={events} onKillNode={killNode} onReviveNode={reviveNode} />
 
           {!presentMode && (
             <div className="panel side-panel">
               <div className="panel-label">Cluster state (click a row for its log)</div>
-              {snapshot.nodes.map((n) => (
+              {viewSnapshot.nodes.map((n) => (
                 <div key={n.ID}>
                   <div
                     className="row"
@@ -163,12 +185,12 @@ export default function Home() {
                 <div className="kv-table">
                   <div className="kv-row kv-header">
                     <span>key</span>
-                    {snapshot.nodes.map((n) => <span key={n.ID}>{n.ID}</span>)}
+                    {viewSnapshot.nodes.map((n) => <span key={n.ID}>{n.ID}</span>)}
                   </div>
                   {allKeys.map((k) => (
                     <div className="kv-row" key={k}>
                       <span>{k}</span>
-                      {snapshot.nodes.map((n) => (
+                      {viewSnapshot.nodes.map((n) => (
                         <span key={n.ID} style={{ color: n.Alive ? "white" : COLORS.text }}>
                           {n.StateMachine?.[k] ?? "—"}
                         </span>
@@ -196,16 +218,35 @@ export default function Home() {
         <div className="status-banner" style={{ borderColor: `${statusColor}55`, color: statusColor }}>
           <span className="status-dot" style={{ background: statusColor }} />
           {statusText}
+          {isScrubbing && <span className="scrub-tag">— viewing history (not live)</span>}
         </div>
 
+        {!presentMode && (
+          <div className="scrubber-row">
+            <span className="size-label">Time travel:</span>
+            <input
+              type="range"
+              min={0}
+              max={Math.max(0, snapshotHistory.current.length - 1)}
+              value={scrubIndex ?? snapshotHistory.current.length - 1}
+              onChange={(e) => setScrubIndex(Number(e.target.value))}
+              className="scrub-slider"
+            />
+            <button className="btn btn-small" onClick={() => setScrubIndex(null)} disabled={!isScrubbing}>
+              Back to live
+            </button>
+          </div>
+        )}
+
         <div className="actions">
-          <button disabled={!leader} onClick={() => leader && killNode(leader.ID)} className="btn btn-danger">
+          <button disabled={!leader || isScrubbing} onClick={() => leader && killNode(leader.ID)} className="btn btn-danger">
             Kill the leader
           </button>
-          <button disabled={!leader} onClick={() => submitWrite(`SET x=${Date.now() % 1000}`)} className="btn">
+          <button disabled={!leader || isScrubbing} onClick={() => submitWrite(`SET x=${Date.now() % 1000}`)} className="btn">
             Submit write
           </button>
           <button
+            disabled={isScrubbing}
             onClick={() => {
               const half = Math.ceil(aliveIds.length / 2);
               partition(aliveIds.slice(0, half), aliveIds.slice(half));
@@ -214,10 +255,10 @@ export default function Home() {
           >
             Partition network
           </button>
-          <button onClick={() => healPartition()} className="btn">
+          <button disabled={isScrubbing} onClick={() => healPartition()} className="btn">
             Heal partition
           </button>
-          <button disabled={!leader || !!scenarioCaption} onClick={runScenario} className="btn btn-accent">
+          <button disabled={!leader || !!scenarioCaption || isScrubbing} onClick={runScenario} className="btn btn-accent">
             Run chaos demo
           </button>
           {!presentMode && (
@@ -232,9 +273,9 @@ export default function Home() {
 
       <div className="ticker">
         <span>Uptime <b style={{ color: "white" }}>{uptimeSec}s</b></span>
-        <span>Elections <b style={{ color: COLORS.leader }}>{snapshot.stats.ElectionsHeld}</b></span>
-        <span>Writes committed <b style={{ color: COLORS.follower }}>{snapshot.stats.WritesCommitted}</b></span>
-        <span>Avg RPC latency <b style={{ color: COLORS.follower }}>{snapshot.stats.AvgLatencyMs.toFixed(0)}ms</b></span>
+        <span>Elections <b style={{ color: COLORS.leader }}>{viewSnapshot.stats.ElectionsHeld}</b></span>
+        <span>Writes committed <b style={{ color: COLORS.follower }}>{viewSnapshot.stats.WritesCommitted}</b></span>
+        <span>Avg RPC latency <b style={{ color: COLORS.follower }}>{viewSnapshot.stats.AvgLatencyMs.toFixed(0)}ms</b></span>
       </div>
 
       {toast && <div className="toast">{toast}</div>}
@@ -289,6 +330,9 @@ export default function Home() {
           display: inline-flex; align-items: center; gap: 8px;
         }
         .status-dot { width: 8px; height: 8px; border-radius: 50%; }
+        .scrub-tag { color: ${COLORS.leader}; margin-left: 6px; }
+        .scrubber-row { display: flex; align-items: center; gap: 10px; margin-top: 16px; }
+        .scrub-slider { flex: 1; max-width: 400px; }
         .actions { display: flex; gap: 12px; margin-top: 16px; flex-wrap: wrap; }
         .btn {
           background: transparent; border: 1px solid ${COLORS.text}55; color: white;
@@ -296,6 +340,7 @@ export default function Home() {
           font-family: "Space Grotesk", sans-serif; font-weight: 600;
           transition: border-color 0.15s ease, transform 0.1s ease;
         }
+        .btn-small { padding: 6px 12px; font-size: 12px; }
         .btn-ghost { border-color: transparent; color: ${COLORS.text}; }
         .btn:hover:not(:disabled) { border-color: ${COLORS.follower}; transform: translateY(-1px); }
         .btn:disabled { opacity: 0.35; cursor: not-allowed; }
